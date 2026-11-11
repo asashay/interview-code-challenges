@@ -9,9 +9,25 @@ namespace OneBeyondApi.DataAccess
         {
             optionsBuilder.UseInMemoryDatabase(databaseName: "AuthorDb");
         }
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.Entity<Fine>()
+                .HasOne(fine => fine.Borrower)
+                .WithMany()
+                .HasForeignKey(fine => fine.BorrowerId)
+                .IsRequired();
+
+            modelBuilder.Entity<Fine>()
+                .HasOne(fine => fine.BookStock)
+                .WithMany()
+                .HasForeignKey(fine => fine.BookStockId)
+                .IsRequired();
+        }
         public DbSet<Author> Authors { get; set; }
         public DbSet<Book> Books { get; set; }
         public DbSet<BookStock> Catalogue { get; set; }
         public DbSet<Borrower> Borrowers { get; set; }
+        public DbSet<Fine> Fines { get; set; }
     }
 }

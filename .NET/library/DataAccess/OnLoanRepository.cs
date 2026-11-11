@@ -5,6 +5,13 @@ namespace OneBeyondApi.DataAccess
 {
     public class OnLoanRepository : IOnLoanRepository
     {
+        private readonly TimeProvider _timeProvider;
+
+        public OnLoanRepository(TimeProvider timeProvider)
+        {
+            _timeProvider = timeProvider;
+        }
+
         public List<BorrowerLoansDto> GetLoans()
         {
             using var context = new LibraryContext();
@@ -49,6 +56,24 @@ namespace OneBeyondApi.DataAccess
             if (stock.OnLoanTo == null)
             {
                 return ReturnBookResult.NotOnLoan;
+            }
+
+            var returnedDate = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
+            if (stock.LoanEndDate is DateTime deadline)
+            {
+                var loanEndDate = DateOnly.FromDateTime(deadline);
+                if (returnedDate > loanEndDate)
+                {
+                    context.Fines.Add(new Fine
+                    {
+                        BorrowerId = stock.OnLoanTo.Id,
+                        Borrower = stock.OnLoanTo,
+                        BookStockId = stock.Id,
+                        BookStock = stock,
+                        LoanEndDate = loanEndDate,
+                        ReturnedDate = returnedDate
+                    });
+                }
             }
 
             stock.OnLoanTo = null;

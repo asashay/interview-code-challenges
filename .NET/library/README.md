@@ -52,8 +52,23 @@ HTTP 204 (no body). An unknown copy returns 404; a copy that is not on loan
 (including a repeated return) returns 409. These errors use ProblemDetails.
 A missing, null, or malformed `bookStockId` returns 400.
 The returned copy disappears from `GET /OnLoan`; borrowers disappear after their
-last copy is returned. Overdue and undated loans can be returned. Fine calculation,
-loan history, and concurrent-return protection are not implemented in this step.
+last copy is returned. Overdue and undated loans can be returned.
+
+Late returns create a stored fine linked to the borrower and the returned copy.
+Lateness compares calendar dates using the server's local date: returning at any
+time on the due date is on time, while returning on a later date creates a fine.
+Missing due dates do not create fines. The clock is supplied through `TimeProvider`.
+
+Each fine stores the original due date and return date as `DateOnly` snapshots,
+which remain after the loan fields are cleared. Days late can be calculated as
+`ReturnedDate.DayNumber - LoanEndDate.DayNumber`; no day count or monetary amount
+is stored. A repeated return still responds with 409 and does not add another fine.
+The fine and cleared loan are saved in one `SaveChanges()` call.
+
+Fines are stored only, without a fines endpoint or changes to existing API
+responses. Payment tracking, general loan history, and concurrent-return protection
+are not implemented. The in-memory database needs no migrations and loses all
+records, including fines, on restart.
 
 Run the API with `dotnet run --project .NET/library/OneBeyondApi.csproj` from the
 repository root, then use `/OnLoan` or the Swagger UI at `/swagger` on the printed URL.
