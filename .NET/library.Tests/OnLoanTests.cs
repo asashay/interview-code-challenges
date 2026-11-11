@@ -7,8 +7,7 @@ using Xunit;
 
 namespace OneBeyondApi.Tests;
 
-// All tests sharing the starter's named in-memory database live in this class
-// so xUnit runs them sequentially, with a fresh database for each test.
+[Collection("Library database")]
 public class OnLoanTests : IDisposable
 {
     public OnLoanTests()

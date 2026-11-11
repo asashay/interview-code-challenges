@@ -74,6 +74,72 @@ Run the API with `dotnet run --project .NET/library/OneBeyondApi.csproj` from th
 repository root, then use `/OnLoan` or the Swagger UI at `/swagger` on the printed URL.
 Run the tests with `dotnet test .NET/library/OneBeyondApi.sln`.
 
+# Implemented: Reservations
+
+`POST /Reservations` reserves a title for a requested number of days:
+
+```json
+{
+  "borrowerId": "11111111-1111-1111-1111-111111111111",
+  "bookId": "22222222-2222-2222-2222-222222222222",
+  "loanDays": 7
+}
+```
+
+Use borrower IDs from `GET /Borrower/GetBorrowers` and book IDs from
+`GET /Book/GetBooks` (or the catalogue's nested `book.id`, not the copy's `id`).
+Success returns HTTP 201, `{ "reservationId": "..." }`, and a Location header
+pointing to `GET /Reservations/{reservationId}`. The public ID is a random GUID.
+
+Creation returns 400 for missing/malformed fields or a duration that is not
+positive or cannot produce a supported due date from today. Unknown borrowers
+or books return 404. A duplicate active reservation for the same borrower/title,
+a title without stock, or a freely available copy produces 409 with ProblemDetails.
+The "available now" response creates no reservation: callers can collect through
+the future collection flow. A copy already needed by an active reservation is
+not freely available, and a borrowed copy due today is not physically available.
+
+`GET /Reservations/{reservationId}` returns the reservation ID, borrower ID, book
+ID, title, loan duration, status (`Active` or `Closed`), `estimatedAvailableOn`,
+and `explanation`. Unknown IDs return 404; malformed GUIDs return 400. Closed
+reservations have no estimate. When an active reservation's date cannot be
+calculated, its estimate is null and the explanation describes the limitation.
+
+Estimates are recalculated from all copies and active reservations for that title.
+The queue sorts by `CreatedAtUtc`, then GUID to break identical timestamps; ties
+are deterministic but do not guarantee arrival order. Each reservation uses the
+copy with the earliest estimated availability, then advances that copy's schedule
+by its requested duration. Equal dates prefer physically available copies, then
+copy ID. No copy assignment or estimated date is stored on the reservation.
+
+Available copies start at today's local date. Borrowed copies start at the later
+of today and their due date, so overdue estimates move forward as time passes.
+Missing due dates are unknown; other copies with known dates can still supply
+the queue. Estimates assume same-day collection and overdue returns today; they
+are not guarantees. Date calculations outside the supported range return an
+unknown estimate rather than overflowing.
+
+Creation uses a singleton lock per title across the duplicate/availability checks
+and insertion. Different titles use independent locks; lock entries remain for
+the application's lifetime. This protects concurrent creation in one API process,
+not multiple processes, transactions, or concurrent loan-return operations.
+
+Collection is outside these endpoints: a future collection operation must assign
+the copy's `OnLoanTo`, set `LoanEndDate`, and close the corresponding reservation.
+The closed reservation then stops contributing to estimates, while the actual
+loan contributes instead. Reservations never close automatically, and creation
+does not start a loan. No cancellation, expiry, or payment features are included.
+
+There is no authentication or ownership check. Random GUIDs reduce enumeration
+risk but anyone possessing a reservation ID can query it. The in-memory provider
+requires no migration and loses reservations on restart.
+
+To try the seeded data in Swagger, reserve "Agile Project Management - A Primer",
+whose only copy is borrowed, then follow the returned Location. "The Importance
+of Clay" and "Rust Development Cookbook" initially have free copies and return
+409 on reservation creation. Returning the borrowed Agile copy through `POST
+/OnLoan` updates its reservation estimates without closing the reservations.
+
 # Mobile Engineer Challenge
 Implement a mobile application using MAUI that provides the following functionality
 1.	Simple login matching on Borrower Name and Email Address (the library system provider has not heard of security!)

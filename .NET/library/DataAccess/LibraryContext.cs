@@ -12,6 +12,18 @@ namespace OneBeyondApi.DataAccess
 
         protected override void OnModelCreating(ModelBuilder modelBuilder)
         {
+            modelBuilder.Entity<Reservation>()
+                .HasOne(reservation => reservation.Borrower)
+                .WithMany()
+                .HasForeignKey(reservation => reservation.BorrowerId)
+                .IsRequired();
+
+            modelBuilder.Entity<Reservation>()
+                .HasOne(reservation => reservation.Book)
+                .WithMany()
+                .HasForeignKey(reservation => reservation.BookId)
+                .IsRequired();
+
             modelBuilder.Entity<Fine>()
                 .HasOne(fine => fine.Borrower)
                 .WithMany()
@@ -29,5 +41,6 @@ namespace OneBeyondApi.DataAccess
         public DbSet<BookStock> Catalogue { get; set; }
         public DbSet<Borrower> Borrowers { get; set; }
         public DbSet<Fine> Fines { get; set; }
+        public DbSet<Reservation> Reservations { get; set; }
     }
 }
