@@ -10,7 +10,7 @@ Authors have a name.
 
 Borrowers have a name and an email address.
 
-There are basic APIs for Books, Authors and Borrowers that will list all entities and allow addition of new records. It is not currently possible via the API to modify the Book Stock in the Catalogue.
+There are basic APIs for Books, Authors and Borrowers that will list all entities and allow addition of new records. The On Loan API also allows borrowed copies in the Catalogue to be returned.
 
 Full docs (and a running instance of the API) can be found at https://library-api.onebeyond.cloud/swagger/index.html
 
@@ -34,6 +34,26 @@ If there are no active loans, the endpoint returns HTTP 200 with `[]`.
 
 “Get/query” is interpreted as retrieving all borrowers with active loans and
 their borrowed book titles. No search filters were specified, so none are included.
+
+`POST /OnLoan` returns one borrowed copy. Obtain the copy's `id` from
+`GET /Catalogue/GetCatalogue` and send it as `bookStockId` in the JSON body.
+The GET On Loan response contains titles only, without copy IDs.
+
+Example POST body:
+
+```json
+{
+  "bookStockId": "11111111-1111-1111-1111-111111111111"
+}
+```
+
+A successful return clears the copy's borrower and due date and responds with
+HTTP 204 (no body). An unknown copy returns 404; a copy that is not on loan
+(including a repeated return) returns 409. These errors use ProblemDetails.
+A missing, null, or malformed `bookStockId` returns 400.
+The returned copy disappears from `GET /OnLoan`; borrowers disappear after their
+last copy is returned. Overdue and undated loans can be returned. Fine calculation,
+loan history, and concurrent-return protection are not implemented in this step.
 
 Run the API with `dotnet run --project .NET/library/OneBeyondApi.csproj` from the
 repository root, then use `/OnLoan` or the Swagger UI at `/swagger` on the printed URL.

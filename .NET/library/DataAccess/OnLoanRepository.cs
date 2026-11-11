@@ -33,5 +33,29 @@ namespace OneBeyondApi.DataAccess
                 .ThenBy(borrower => borrower.BorrowerId)
                 .ToList();
         }
+
+        public ReturnBookResult ReturnBook(Guid bookStockId)
+        {
+            using var context = new LibraryContext();
+            var stock = context.Catalogue
+                .Include(copy => copy.OnLoanTo)
+                .SingleOrDefault(copy => copy.Id == bookStockId);
+
+            if (stock == null)
+            {
+                return ReturnBookResult.NotFound;
+            }
+
+            if (stock.OnLoanTo == null)
+            {
+                return ReturnBookResult.NotOnLoan;
+            }
+
+            stock.OnLoanTo = null;
+            stock.LoanEndDate = null;
+            context.SaveChanges();
+
+            return ReturnBookResult.Returned;
+        }
     }
 }
