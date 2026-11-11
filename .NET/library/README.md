@@ -23,6 +23,22 @@ Extend the existing API to add the following functionality:
 4. Add functionality to allow a borrower to reserve a particular title that is currently on loan (also consider the case of multiple borrowers all wanting to borrow the same book). The borrower should also be able to query via the API to find out when the book will be available for them.
 
 
+# Implemented: On Loan
+
+`GET /OnLoan` returns all borrowers with active loans, grouped by borrower ID.
+Each result contains `borrowerId`, `name`, `emailAddress`, and a `titles` array.
+A copy is on loan when `OnLoanTo` is assigned, including overdue copies.
+Titles contain one entry per borrowed copy, so borrowing multiple copies of a
+title produces repeated entries. Borrowers without active loans are excluded.
+If there are no active loans, the endpoint returns HTTP 200 with `[]`.
+
+“Get/query” is interpreted as retrieving all borrowers with active loans and
+their borrowed book titles. No search filters were specified, so none are included.
+
+Run the API with `dotnet run --project .NET/library/OneBeyondApi.csproj` from the
+repository root, then use `/OnLoan` or the Swagger UI at `/swagger` on the printed URL.
+Run the tests with `dotnet test .NET/library/OneBeyondApi.sln`.
+
 # Mobile Engineer Challenge
 Implement a mobile application using MAUI that provides the following functionality
 1.	Simple login matching on Borrower Name and Email Address (the library system provider has not heard of security!)
