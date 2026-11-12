@@ -146,7 +146,7 @@ public class ReservationTests : IDisposable
         _clock.UtcNow = _clock.UtcNow.AddDays(2);
         Assert.Equal(new DateOnly(2026, 11, 13), Repository().Get(first.Id)!.EstimatedAvailableOn);
         Assert.Equal(new DateOnly(2026, 11, 20), Repository().Get(second.Id)!.EstimatedAvailableOn);
-        Assert.Equal(ReturnBookResult.Returned, new OnLoanRepository(_clock).ReturnBook(copyId));
+        Assert.Equal(ReturnBookResult.Returned, new OnLoanRepository(_clock, _locks).ReturnBook(copyId));
         Assert.Equal(new DateOnly(2026, 11, 13), Repository().Get(first.Id)!.EstimatedAvailableOn);
         using var context = new LibraryContext();
         Assert.All(context.Reservations, reservation => Assert.Equal(ReservationStatus.Active, reservation.Status));

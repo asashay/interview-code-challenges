@@ -6,10 +6,12 @@ namespace OneBeyondApi.DataAccess
     public class OnLoanRepository : IOnLoanRepository
     {
         private readonly TimeProvider _timeProvider;
+        private readonly TitleLockProvider _titleLocks;
 
-        public OnLoanRepository(TimeProvider timeProvider)
+        public OnLoanRepository(TimeProvider timeProvider, TitleLockProvider titleLocks)
         {
             _timeProvider = timeProvider;
+            _titleLocks = titleLocks;
         }
 
         public List<BorrowerLoansDto> GetLoans()
@@ -44,43 +46,58 @@ namespace OneBeyondApi.DataAccess
         public ReturnBookResult ReturnBook(Guid bookStockId)
         {
             using var context = new LibraryContext();
-            var stock = context.Catalogue
-                .Include(copy => copy.OnLoanTo)
-                .SingleOrDefault(copy => copy.Id == bookStockId);
+            var bookId = context.Catalogue
+                .AsNoTracking()
+                .Where(copy => copy.Id == bookStockId)
+                .Select(copy => (Guid?)copy.Book.Id)
+                .SingleOrDefault();
 
-            if (stock == null)
+            if (bookId == null)
             {
                 return ReturnBookResult.NotFound;
             }
 
-            if (stock.OnLoanTo == null)
+            // Share the reservation gate and load mutable loan state only after acquiring it.
+            lock (_titleLocks.GetLock(bookId.Value))
             {
-                return ReturnBookResult.NotOnLoan;
-            }
+                var stock = context.Catalogue
+                    .Include(copy => copy.OnLoanTo)
+                    .SingleOrDefault(copy => copy.Id == bookStockId);
 
-            var returnedDate = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
-            if (stock.LoanEndDate is DateTime deadline)
-            {
-                var loanEndDate = DateOnly.FromDateTime(deadline);
-                if (returnedDate > loanEndDate)
+                if (stock == null)
                 {
-                    context.Fines.Add(new Fine
-                    {
-                        BorrowerId = stock.OnLoanTo.Id,
-                        Borrower = stock.OnLoanTo,
-                        BookStockId = stock.Id,
-                        BookStock = stock,
-                        LoanEndDate = loanEndDate,
-                        ReturnedDate = returnedDate
-                    });
+                    return ReturnBookResult.NotFound;
                 }
+
+                if (stock.OnLoanTo == null)
+                {
+                    return ReturnBookResult.NotOnLoan;
+                }
+
+                var returnedDate = DateOnly.FromDateTime(_timeProvider.GetLocalNow().DateTime);
+                if (stock.LoanEndDate is DateTime deadline)
+                {
+                    var loanEndDate = DateOnly.FromDateTime(deadline);
+                    if (returnedDate > loanEndDate)
+                    {
+                        context.Fines.Add(new Fine
+                        {
+                            BorrowerId = stock.OnLoanTo.Id,
+                            Borrower = stock.OnLoanTo,
+                            BookStockId = stock.Id,
+                            BookStock = stock,
+                            LoanEndDate = loanEndDate,
+                            ReturnedDate = returnedDate
+                        });
+                    }
+                }
+
+                stock.OnLoanTo = null;
+                stock.LoanEndDate = null;
+                context.SaveChanges();
+
+                return ReturnBookResult.Returned;
             }
-
-            stock.OnLoanTo = null;
-            stock.LoanEndDate = null;
-            context.SaveChanges();
-
-            return ReturnBookResult.Returned;
         }
     }
 }

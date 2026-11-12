@@ -10,6 +10,8 @@ namespace OneBeyondApi.Tests;
 [Collection("Library database")]
 public class OnLoanTests : IDisposable
 {
+    private readonly TitleLockProvider _locks = new();
+
     public OnLoanTests()
     {
         using var context = new LibraryContext();
@@ -255,7 +257,7 @@ public class OnLoanTests : IDisposable
         var zone = TimeZoneInfo.CreateCustomTimeZone("Test local", TimeSpan.FromHours(offsetHours), "Test local", "Test local");
         var clock = new FixedTimeProvider(new DateTimeOffset(2026, 11, 11, 23, 59, 59, TimeSpan.Zero), zone);
 
-        Assert.Equal(ReturnBookResult.Returned, new OnLoanRepository(clock).ReturnBook(copy.Id));
+        Assert.Equal(ReturnBookResult.Returned, new OnLoanRepository(clock, _locks).ReturnBook(copy.Id));
 
         using var freshContext = new LibraryContext();
         Assert.Equal(expectedFines, freshContext.Fines.Count());
@@ -302,8 +304,169 @@ public class OnLoanTests : IDisposable
         Assert.Equal(new DateOnly(2026, 11, 10), fines.Single(fine => fine.BorrowerId == secondBorrowerId).LoanEndDate);
     }
 
-    private static OnLoanRepository CreateRepository() => new(new FixedTimeProvider(
-        new DateTimeOffset(2026, 11, 11, 23, 59, 59, TimeSpan.Zero), TimeZoneInfo.Utc));
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ConcurrentReturnsCompleteOnceAndCreateAtMostOneFine(bool overdue)
+    {
+        using var context = new LibraryContext();
+        var copy = Copy("Borrowed", Borrower("Reader"), new DateTime(2026, 11, overdue ? 10 : 12));
+        context.Catalogue.Add(copy);
+        context.SaveChanges();
+        using var clock = new BlockingTimeProvider();
+        var first = RunOnWorker(() => new OnLoanRepository(clock, _locks).ReturnBook(copy.Id));
+        Task<ReturnBookResult>? second = null;
+        try
+        {
+            await clock.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+            var secondStarted = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            second = RunOnWorker(() =>
+            {
+                secondStarted.SetResult();
+                return CreateRepository().ReturnBook(copy.Id);
+            });
+            await secondStarted.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            // The first call has loaded the loan but cannot save until the clock is released.
+            Assert.NotSame(second, await Task.WhenAny(second, Task.Delay(200)));
+        }
+        finally
+        {
+            clock.Release();
+            await first.WaitAsync(TimeSpan.FromSeconds(5));
+            if (second != null) await second.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+
+        Assert.Equal(ReturnBookResult.Returned, await first);
+        Assert.Equal(ReturnBookResult.NotOnLoan, await second!);
+        using var freshContext = new LibraryContext();
+        var returned = freshContext.Catalogue.Include(stock => stock.OnLoanTo).Single();
+        Assert.Null(returned.OnLoanTo);
+        Assert.Null(returned.LoanEndDate);
+        Assert.Equal(overdue ? 1 : 0, freshContext.Fines.Count());
+        if (overdue)
+        {
+            var fine = Assert.Single(freshContext.Fines);
+            Assert.Equal(copy.Id, fine.BookStockId);
+            Assert.Equal(copy.OnLoanTo!.Id, fine.BorrowerId);
+        }
+    }
+
+    [Fact]
+    public async Task ReturnExceptionReleasesLockAndPreservesLoanForRetry()
+    {
+        using var context = new LibraryContext();
+        var copy = Copy("Borrowed", Borrower("Reader"), new DateTime(2026, 11, 10));
+        context.Catalogue.Add(copy);
+        context.SaveChanges();
+        var failing = new OnLoanRepository(new ThrowingTimeProvider(), _locks);
+
+        Assert.Throws<InvalidOperationException>(() => failing.ReturnBook(copy.Id));
+
+        using (var freshContext = new LibraryContext())
+        {
+            Assert.Empty(freshContext.Fines);
+            Assert.NotNull(freshContext.Catalogue.Include(stock => stock.OnLoanTo).Single().OnLoanTo);
+        }
+        // Retry on another thread so a leaked, reentrant monitor cannot hide the failure.
+        var retry = await RunOnWorker(() => CreateRepository().ReturnBook(copy.Id)).WaitAsync(TimeSpan.FromSeconds(5));
+        Assert.Equal(ReturnBookResult.Returned, retry);
+        using var savedContext = new LibraryContext();
+        Assert.Single(savedContext.Fines);
+    }
+
+    [Fact]
+    public async Task ReturningAnotherTitleDoesNotWaitForBlockedReturn()
+    {
+        using var context = new LibraryContext();
+        var firstCopy = Copy("First", Borrower("First reader"), new DateTime(2026, 11, 10));
+        var otherCopy = Copy("Other", Borrower("Other reader"), new DateTime(2026, 11, 10));
+        context.Catalogue.AddRange(firstCopy, otherCopy);
+        context.SaveChanges();
+        using var clock = new BlockingTimeProvider();
+        var first = RunOnWorker(() => new OnLoanRepository(clock, _locks).ReturnBook(firstCopy.Id));
+        Task<ReturnBookResult>? other = null;
+        try
+        {
+            await clock.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+            other = RunOnWorker(() => CreateRepository().ReturnBook(otherCopy.Id));
+            Assert.Equal(ReturnBookResult.Returned, await other.WaitAsync(TimeSpan.FromSeconds(5)));
+            Assert.False(first.IsCompleted);
+        }
+        finally
+        {
+            clock.Release();
+            await first.WaitAsync(TimeSpan.FromSeconds(5));
+            if (other != null) await other.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        using var freshContext = new LibraryContext();
+        Assert.Equal(2, freshContext.Fines.Count());
+    }
+
+    [Fact]
+    public async Task ReservationWaitsForReturnAndSeesTheAvailableCopy()
+    {
+        using var context = new LibraryContext();
+        var copy = Copy("Borrowed", Borrower("Reader"), new DateTime(2026, 11, 10));
+        var waitingBorrower = Borrower("Waiting reader");
+        context.Catalogue.Add(copy);
+        context.Borrowers.Add(waitingBorrower);
+        context.SaveChanges();
+        using var clock = new BlockingTimeProvider();
+        var returning = RunOnWorker(() => new OnLoanRepository(clock, _locks).ReturnBook(copy.Id));
+        Task<ReservationCreationResult>? reserving = null;
+        try
+        {
+            await clock.Entered.WaitAsync(TimeSpan.FromSeconds(5));
+            var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            reserving = RunOnWorker(() =>
+            {
+                started.SetResult();
+                var repository = new ReservationRepository(new FixedTimeProvider(
+                    new DateTimeOffset(2026, 11, 11, 23, 59, 59, TimeSpan.Zero), TimeZoneInfo.Utc), _locks);
+                return repository.Create(waitingBorrower.Id, copy.Book.Id, 7);
+            });
+            await started.Task.WaitAsync(TimeSpan.FromSeconds(5));
+            Assert.NotSame(reserving, await Task.WhenAny(reserving, Task.Delay(200)));
+        }
+        finally
+        {
+            clock.Release();
+            await returning.WaitAsync(TimeSpan.FromSeconds(5));
+            if (reserving != null) await reserving.WaitAsync(TimeSpan.FromSeconds(5));
+        }
+        Assert.Equal(ReservationCreationStatus.AvailableNow, (await reserving!).Status);
+        using var freshContext = new LibraryContext();
+        Assert.Empty(freshContext.Reservations);
+    }
+
+    private static Task<T> RunOnWorker<T>(Func<T> action) => Task.Factory.StartNew(
+        action, CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
+
+    private sealed class BlockingTimeProvider : TimeProvider, IDisposable
+    {
+        private readonly TaskCompletionSource _entered = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly ManualResetEventSlim _release = new();
+        public Task Entered => _entered.Task;
+        public override TimeZoneInfo LocalTimeZone => TimeZoneInfo.Utc;
+
+        public override DateTimeOffset GetUtcNow()
+        {
+            _entered.TrySetResult();
+            if (!_release.Wait(TimeSpan.FromSeconds(15))) throw new TimeoutException("Return was not released.");
+            return new DateTimeOffset(2026, 11, 11, 23, 59, 59, TimeSpan.Zero);
+        }
+
+        public void Release() => _release.Set();
+        public void Dispose() => _release.Dispose();
+    }
+
+    private sealed class ThrowingTimeProvider : TimeProvider
+    {
+        public override DateTimeOffset GetUtcNow() => throw new InvalidOperationException("Simulated clock failure.");
+    }
+
+    private OnLoanRepository CreateRepository() => new(new FixedTimeProvider(
+        new DateTimeOffset(2026, 11, 11, 23, 59, 59, TimeSpan.Zero), TimeZoneInfo.Utc), _locks);
 
     private sealed class FixedTimeProvider(DateTimeOffset utcNow, TimeZoneInfo localTimeZone) : TimeProvider
     {
